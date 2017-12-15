@@ -70,12 +70,16 @@ model = DependencyParseModel(word_embeddings_dim, posTags_embeddings_dim, vocabu
 mlpArcsScores = MLP(mlpForScoresInputSize * 2, mlpForScoresInputSize, 1)
 mlpLabels = MLP(mlpForScoresInputSize * 2, mlpForScoresInputSize * 2, labelsUniqueCount)
 
-parameters = filter(lambda p: p.requires_grad, model.parameters())
-parameters = nn.ParameterList(list(parameters))
-optimizer = torch.optim.Adam(parameters, lr=0.1, weight_decay=1e-5)
+
+parametersLSTM = filter(lambda p: p.requires_grad, model.parameters())
+parametersMlpArcs = filter(lambda p: p.requires_grad, mlpArcsScores.parameters())
+parametersMlpLabels = filter(lambda p: p.requires_grad, mlpLabels.parameters())
+parameters = nn.ParameterList(list(parametersLSTM)+list(parametersMlpArcs)+list(parametersMlpLabels))
+
+optimizer = torch.optim.Adam(parameters, lr=0.01, weight_decay=1e-6)
 
 
-epochs = 10
+epochs = 50
 lossgraph = []
 counter = 0
 outputarray = []
@@ -93,6 +97,8 @@ print('start training..')
 # shuffle(sentencesDependencies)
 # model.hiddenState, model.cellState = model.initHiddenCellState()
 for epoch in range(epochs):
+    print('Epochstart:', epoch)
+
     starttime = time.time()
     counter = 0
     total_output = 0
@@ -102,6 +108,7 @@ for epoch in range(epochs):
 
         # clear gradients
         optimizer.zero_grad()
+        # print(list(mlpLabels.parameters())[0].grad)
 
         sentenceInWords, sentenceInTags = s.getSentenceInWordsAndInTags()
 
@@ -115,6 +122,7 @@ for epoch in range(epochs):
         arcs_target = Variable(torch.from_numpy(arcs_refdata).long(), requires_grad=False)
         labels_refdata = s.getLabelsForWords(l2i)
         labels_target = Variable(torch.from_numpy(labels_refdata).long(), requires_grad=False)
+
         # Forward pass
         hVector = model(words_tensor, tags_tensor)
 
@@ -130,24 +138,23 @@ for epoch in range(epochs):
         arcs_loss = loss(arcsTensor, arcs_target)
 
         labelTensor = Variable(torch.FloatTensor(len(sentenceInWords), labelsUniqueCount).zero_())
-        for i, head in enumerate(labels_refdata):
+        for i, head in enumerate(arcs_refdata):
             if head == 0:
                 continue
-            labelTensor[i, :] = mlpLabels(hVector[i - 1, :, :], hVector[head - 1, :, :])
-
+            labelTensor[i - 1, :] = mlpLabels(hVector[i - 1, :, :], hVector[head - 1, :, :])
 
         label_loss = loss(labelTensor, labels_target)
         total_loss = arcs_loss + label_loss
         total_loss.backward(retain_graph=True)
-        # print(list(model.parameters())[0].grad)
-
+        # print(list(mlpLabels.parameters())[0].grad)
         optimizer.step()
 
         counter += 1
-
-        if counter == 3:
+        print(total_loss)
+        if counter == 1:
             break
-    print(epoch)
+    lossgraph.append(total_loss)
+    print('end\n')
 
 
 # print(outputarray)
