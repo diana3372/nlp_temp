@@ -17,6 +17,9 @@ from torch.autograd import Variable
 from random import shuffle
 import time
 import matplotlib.pyplot as plt
+from MLP import MLP
+import itertools
+
 
 unknownMarker = '<unk>'
 
@@ -61,20 +64,25 @@ for k,v in i2t.items():
     assert v in POSTagsModel.wv.vocab
     pretrainedTagEmbeddings[k] = POSTagsModel[v]
 
+mlpForScoresInputSize = (word_embeddings_dim + posTags_embeddings_dim) * 2
 
 model = DependencyParseModel(word_embeddings_dim, posTags_embeddings_dim, vocabularySize, tagsUniqueCount, labelsUniqueCount, pretrainedWordEmbeddings, pretrainedTagEmbeddings)
+mlpArcsScores = MLP(mlpForScoresInputSize * 2, mlpForScoresInputSize, 1)
+mlpLabels = MLP(mlpForScoresInputSize * 2, mlpForScoresInputSize * 2, labelsUniqueCount)
+
 parameters = filter(lambda p: p.requires_grad, model.parameters())
 parameters = nn.ParameterList(list(parameters))
-optimizer = torch.optim.SGD(parameters, lr=0.1, weight_decay=1e-5)
+optimizer = torch.optim.Adam(parameters, lr=0.1, weight_decay=1e-5)
 
-for param in model.state_dict().keys():
-    print(param)
-epochs = 20
+
+epochs = 10
 lossgraph = []
 counter = 0
 outputarray = []
 outputarrayarcs = []
 outputarraylabels = []
+
+dummyoutput = Variable(torch.randn((18, 1, 200)))
 
 # Calculate loss
 loss = nn.CrossEntropyLoss()
@@ -89,7 +97,6 @@ for epoch in range(epochs):
     counter = 0
     total_output = 0
     for s in sentencesDependencies:
-
         # Clear hidden and cell previous state
         model.hiddenState, model.cellState = model.initHiddenCellState()
 
@@ -99,82 +106,68 @@ for epoch in range(epochs):
         sentenceInWords, sentenceInTags = s.getSentenceInWordsAndInTags()
 
         wordsToIndices = [w2i[w] for w in sentenceInWords]
-        words_tensor = torch.LongTensor(wordsToIndices)
+        words_tensor = Variable(torch.LongTensor(wordsToIndices))
 
         tagsToIndices = [t2i[t] for t in sentenceInTags]
-        tags_tensor = torch.LongTensor(tagsToIndices)
+        tags_tensor = Variable(torch.LongTensor(tagsToIndices))
 
         arcs_refdata = s.getHeadsForWords()
-
-        # Forward pass
-        scoreTensor, labelTensor = model(words_tensor, tags_tensor, arcs_refdata)
-        # Get reference data (gold) for arcs
-        arcs_refdata = torch.from_numpy(arcs_refdata)
-        arcs_refdata = arcs_refdata.long()
-
-        # also need to use the gold data for labels here:
+        arcs_target = Variable(torch.from_numpy(arcs_refdata).long(), requires_grad=False)
         labels_refdata = s.getLabelsForWords(l2i)
-        labels_refdata = torch.from_numpy(labels_refdata)
-        labels_refdata = labels_refdata.long()
+        labels_target = Variable(torch.from_numpy(labels_refdata).long(), requires_grad=False)
+        # Forward pass
+        hVector = model(words_tensor, tags_tensor)
 
-        #get sentence length
-        sentence_length = len(s.tokens)
+        perms = list(itertools.product([x for x in range(len(sentenceInWords))], repeat=2))
+        arcsTensor = Variable(torch.FloatTensor(len(sentenceInWords) + 1, len(sentenceInWords) + 1).zero_())
+        for perm in perms:
+            arcsTensor[perm[0] + 1, perm[1] + 1] = mlpArcsScores(hVector[perm[0], :, :], hVector[perm[1], :, :])
+
+        # initiliaze dummy targets
+        dummyoutputarcs = Variable(torch.LongTensor(len(sentenceInWords) + 1).zero_(), requires_grad=False)
+        dummyoutputlabels = Variable(torch.LongTensor(len(sentenceInWords)).zero_(), requires_grad=False)
+
+        arcs_loss = loss(arcsTensor, arcs_target)
+
+        labelTensor = Variable(torch.FloatTensor(len(sentenceInWords), labelsUniqueCount).zero_())
+        for i, head in enumerate(labels_refdata):
+            if head == 0:
+                continue
+            labelTensor[i, :] = mlpLabels(hVector[i - 1, :, :], hVector[head - 1, :, :])
 
 
-        # For the arcs classification
-        modelinput_arcs = scoreTensor.transpose(0, 1)
-        target_arcs = Variable(arcs_refdata)
-        target_arcs = target_arcs
-        loss_arcs = loss(modelinput_arcs, target_arcs)
-
-        # For the label classification
-        modelinput_labels = labelTensor
-        target_labels = Variable(labels_refdata)
-        loss_labels = loss(modelinput_labels, target_labels)
-        output = loss_arcs + loss_labels
-        # print("this is the output ", output)
-        output.backward()
+        label_loss = loss(labelTensor, labels_target)
+        total_loss = arcs_loss + label_loss
+        total_loss.backward(retain_graph=True)
+        # print(list(model.parameters())[0].grad)
 
         optimizer.step()
-        counter += 1
-        #running_loss += output.data[0]
-        outputarray.append(output.data[0])
-        outputarrayarcs.append(loss_arcs.data[0])
-        outputarraylabels.append(loss_labels.data[0])
 
-        total_output += output.data[0]
-        # just for testing purposes. Remove when doing the actual training
-        if counter == 5:
+        counter += 1
+
+        if counter == 3:
             break
-        if np.mod(counter, 50) == 0:
-            print(counter)
-        print(output.data[0], len(sentenceInWords))
-    print('')
     print(epoch)
 
-    lossgraph.append(total_output)
 
-    print(time.time() - starttime)
-    print('')
-
-print(outputarray)
-print(lossgraph)
-
-date = str(time.strftime("%d_%m_%H_%M"))
-savename = "DependencyParserModel_" + date + ".pkl"
-imagename = "DependencyParserModel_" + date + ".jpg"
-
-torch.save(model.state_dict(), savename)
-
-fig, axes = plt.subplots(2,2)
-axes[0, 0].plot(lossgraph)
-axes[0, 1].plot(outputarray)
-axes[1, 0].plot(outputarrayarcs)
-axes[1, 1].plot(outputarraylabels)
-axes[0, 0].set_title('Loss per epoch')
-axes[0, 1].set_title('Loss per sentence')
-axes[1, 0].set_title('Loss arcs MLP')
-axes[1, 1].set_title('Loss label MLP')
-fig.subplots_adjust(hspace=0.5)
-fig.subplots_adjust(wspace=0.5)
-plt.savefig(imagename)
+# print(outputarray)
+# print(lossgraph)
+#
+# date = str(time.strftime("%d_%m_%H_%M"))
+# savename = "DependencyParserModel_" + date + ".pkl"
+# imagename = "DependencyParserModel_" + date + ".jpg"
+#
+# torch.save(model.state_dict(), savename)
+#
+# fig, axes = plt.subplots(2,2)
+# axes[0, 0].plot(lossgraph)
+# axes[0, 1].plot(outputarray)
+# axes[1, 0].plot(outputarrayarcs)
+# axes[1, 1].plot(outputarraylabels)
+# axes[0, 0].set_title('Loss per epoch')
+# axes[0, 1].set_title('Loss per sentence')
+# axes[1, 0].set_title('Loss arcs MLP')
+# axes[1, 1].set_title('Loss label MLP')
+# fig.subplots_adjust(hspace=0.5)
+# fig.subplots_adjust(wspace=0.5)
+# plt.savefig(imagename)

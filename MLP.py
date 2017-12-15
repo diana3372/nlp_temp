@@ -3,6 +3,7 @@ Multilayer perceptron to distinguish between head and dependent
 """
 
 import torch.nn as nn
+import torch
 
 
 class MLP(nn.Module):
@@ -20,7 +21,8 @@ class MLP(nn.Module):
         # The output nonlinearity
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, input):
+    def forward(self, input1, input2):
+        input = torch.cat((input1, input2), 1)
         hidden = self.tanh(self.i2h(input))
         output = self.sigmoid(self.h2o(hidden))
         return output
